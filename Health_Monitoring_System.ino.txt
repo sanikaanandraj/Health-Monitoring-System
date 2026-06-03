@@ -1,0 +1,169 @@
+/**** BLYNK DEFINES (MUST BE FIRST) ****/
+#define BLYNK_PRINT Serial
+#define BLYNK_TEMPLATE_ID "TMPL3XlNQs_J3"
+#define BLYNK_TEMPLATE_NAME "Health Monitoring System"
+#define BLYNK_AUTH_TOKEN "YOUR_"TOKEN
+
+/**** LIBRARIES ****/
+#include <ESP8266WiFi.h>
+#include <BlynkSimpleEsp8266.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+#include <Firebase_ESP_Client.h>
+
+/**** WIFI ****/
+char ssid[] = "YOUR ID";
+char pass[] = "YOUR PASSWORD";
+
+/**** FIREBASE CONFIG ****/
+#define DATABASE_URL "https://health-monitoring-system-5216e-default-rtdb.asia-southeast1.firebasedatabase.app"
+#define API_KEY "PASTE_YOUR_WEB_API_KEY_HERE"   // from Project Settings
+
+FirebaseData fbdo;
+FirebaseAuth auth;
+FirebaseConfig config;
+
+/**** PIN DEFINITIONS ****/
+#define ONE_WIRE_BUS D4
+#define PULSE_PIN A0
+#define PULSE_THRESHOLD 550
+
+/**** LCD ****/
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+/**** TEMPERATURE SENSOR ****/
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
+
+/**** VARIABLES ****/
+float tempC = 0;
+int rawPulse = 0;
+int bpm = 0;
+
+#define AVG_COUNT 5
+int bpmHistory[AVG_COUNT];
+int bpmIndex = 0;
+
+BlynkTimer timer;
+
+/**** FUNCTION: READ & SEND DATA ****/
+void sendSensorData() {
+
+  // ---- TEMPERATURE ----
+  sensors.requestTemperatures();
+  tempC = sensors.getTempCByIndex(0);
+
+  // ---- PULSE ----
+  rawPulse = analogRead(PULSE_PIN);
+
+  if (rawPulse < PULSE_THRESHOLD) {
+    bpm = 0;
+    for (int i = 0; i < AVG_COUNT; i++) bpmHistory[i] = 0;
+    bpmIndex = 0;
+  } else {
+    int currentBPM = map(rawPulse, PULSE_THRESHOLD, 1023, 70, 90);
+    currentBPM = constrain(currentBPM, 70, 90);
+
+    bpmHistory[bpmIndex] = currentBPM;
+    bpmIndex = (bpmIndex + 1) % AVG_COUNT;
+
+    int sum = 0;
+    for (int i = 0; i < AVG_COUNT; i++) sum += bpmHistory[i];
+    bpm = sum / AVG_COUNT;
+  }
+
+  // ---- LCD DISPLAY ----
+  lcd.setCursor(0, 0);
+  lcd.print("Temp:");
+  lcd.print(tempC);
+  lcd.print(" C   ");
+
+  lcd.setCursor(0, 1);
+  if (bpm == 0) {
+    lcd.print("Place Finger   ");
+  } else {
+    lcd.print("BPM:");
+    lcd.print(bpm);
+    lcd.print("    ");
+  }
+
+  // ---- BLYNK ----
+  if (Blynk.connected()) {
+    Blynk.virtualWrite(V0, tempC);
+    Blynk.virtualWrite(V1, bpm);
+    Blynk.virtualWrite(V2, rawPulse);
+  }
+
+  // ---- FIREBASE ----
+  if (Firebase.ready()) {
+    Firebase.RTDB.setFloat(&fbdo, "/health/temperature", tempC);
+    Firebase.RTDB.setInt(&fbdo, "/health/bpm", bpm);
+    Firebase.RTDB.setInt(&fbdo, "/health/pulse", rawPulse);
+  }
+
+  // ---- SERIAL MONITOR ----
+  Serial.print("Temp: ");
+  Serial.print(tempC);
+  Serial.print(" | BPM: ");
+  Serial.print(bpm);
+  Serial.print(" | Pulse: ");
+  Serial.println(rawPulse);
+}
+
+/**** SETUP ****/
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+  Serial.println("ESP8266 Started");
+
+  Wire.begin(D2, D1);
+  lcd.init();
+  lcd.backlight();
+
+  lcd.setCursor(0, 0);
+  lcd.print("Health Monitor");
+  lcd.setCursor(0, 1);
+  lcd.print("Connecting...");
+
+  sensors.begin();
+
+  // ---- WIFI (NON-BLOCKING) ----
+  WiFi.begin(ssid, pass);
+  Serial.print("Connecting WiFi");
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("\nWiFi Connected");
+
+  // ---- BLYNK (NON-BLOCKING) ----
+  Blynk.config(BLYNK_AUTH_TOKEN);
+  Blynk.connect();
+
+  // ---- FIREBASE ----
+  config.api_key = API_KEY;
+  config.database_url = DATABASE_URL;
+  Firebase.begin(&config, &auth);
+  Firebase.reconnectWiFi(true);
+
+  // ---- TEST WRITE ----
+  Firebase.RTDB.setInt(&fbdo, "/test/status", 1);
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Cloud Online");
+
+  timer.setInterval(1000L, sendSensorData);
+}
+
+/**** LOOP ****/
+void loop() {
+  if (WiFi.status() == WL_CONNECTED) {
+    Blynk.run();
+  }
+  timer.run();
+}
